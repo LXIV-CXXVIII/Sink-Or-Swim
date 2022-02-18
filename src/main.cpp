@@ -1,8 +1,4 @@
-﻿#include "C:/dev/ExamplePlugin-CommonLibSSE/build/simpleini-master/SimpleIni.h"
-#include "C:/dev/ExamplePlugin-CommonLibSSE/build/SkyrimOnlineService.h"
-#include "TrueHUDAPI.h"
-
-extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface * a_skse, SKSE::PluginInfo * a_info)
+﻿extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface * a_skse, SKSE::PluginInfo * a_info)
 {
 #ifndef NDEBUG
     auto sink = std::make_shared<spdlog::sinks::msvc_sink_mt>();
@@ -12,7 +8,7 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface * 
         return false;
     }
 
-    *path /= "loki_SkyrimOnlineService.log"sv;
+    *path /= "SinkOrSwim.log"sv;
     auto sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(path->string(), true);
 #endif
 
@@ -22,16 +18,16 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface * 
     log->set_level(spdlog::level::trace);
 #else
     log->set_level(spdlog::level::info);
-    log->flush_on(spdlog::level::info);
+    log->flush_on(spdlog::level::warn);
 #endif
 
     spdlog::set_default_logger(std::move(log));
     spdlog::set_pattern("%g(%#): [%^%l%$] %v"s);
 
-    logger::info("loki_SkyrimOnlineService v1");
+    logger::info("SinkOrSwim v1.0.0");
 
     a_info->infoVersion = SKSE::PluginInfo::kVersion;
-    a_info->name = "loki_SkyrimOnlineService";
+    a_info->name = "SinkOrSwim";
     a_info->version = 1;
 
     if (a_skse->IsEditor()) {
@@ -48,241 +44,163 @@ extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Query(const SKSE::QueryInterface * 
     return true;
 }
 
-/**/
-using ItemMap = RE::TESObjectREFR::InventoryItemMap;
-class SkyrimOnlineService_Host {
+static bool isHeavy = FALSE;
 
-    struct Player {
-    public:
-        std::string      PlayerName = {};
-        std::uint16_t    PlayerLevel = NULL;
-        //ItemMap          PlayerInventory = {};
-        RE::BGSLocation* PlayerLocation = {};
-        bool IsLobbyOpen = false;
-
-    };
-    struct ConnectedPlayer {
-    public:
-        std::string   PlayerInstance = {};
-        std::uint64_t SteamID = {};
-        std::string   Token = {};
-        Player        player;
-    };
-    struct Pool {
-    public:
-        std::string ID = {};
-        std::list<ConnectedPlayer> Players;
-    };
-    struct Scope {
-    public:
-        std::string     App;
-        std::list<Pool> Pools;
-    };
-
+class Loki_SinkOrSwim
+{
 public:
-    virtual HSteamListenSocket CreateListenSocket(const SteamNetworkingIPAddr& localAddress, int nOptions, const SteamNetworkingConfigValue_t* pOptions) {
-    
-    }
-    virtual SteamAPICall_t  CreateCoopLobby(ISteamMatchmaking* a_mm, ELobbyType a_lobbyType) { return _CreateCoopLobbyImpl(a_mm, a_lobbyType); };
-    virtual SteamAPICall_t  CreateGroupLobby(ISteamMatchmaking* a_mm, ELobbyType a_lobbyType) { return _CreateGroupLobbyImpl(a_mm, a_lobbyType); };
-    virtual SteamAPICall_t  LeaveLobby(ISteamMatchmaking* a_mm, CSteamID a_lobby) { return _LeaveLobbyImpl(a_mm, a_lobby); };
-    virtual Player          GetPlayer() { return ConstructPlayerInformation(); };
-    virtual RE::NiAVObject* GetPlayer3D() { return _GetPlayer3DImpl(); };
+    void* CodeAllocation(Xbyak::CodeGenerator& a_code, SKSE::Trampoline* t_ptr)
+    {
+        auto result = t_ptr->allocate(a_code.getSize());
+        std::memcpy(result, a_code.getCode(), a_code.getSize());
+        return result;
 
-    // members
-    bool isNetworkActive = false;
+    }
+    static void InstallSwimmingHook()
+    {
+        REL::Relocation<std::uintptr_t> target{ REL::ID(36357), 0x6ED };  // actor_update code insertion point
+        REL::Relocation<std::uintptr_t> isSwimmingVariable{ REL::ID(241932) };
+        Loki_SinkOrSwim L_SOS;
+
+        struct Patch : Xbyak::CodeGenerator
+        {
+            Patch(std::uintptr_t a_variable, std::uintptr_t a_target)
+            {
+                Xbyak::Label _OurReturn;
+                Xbyak::Label retLabel;
+                Xbyak::Label isSwimmingAddr;
+
+                setae(r13b);
+                mov(rcx, (uintptr_t)&isHeavy);
+                cmp(byte[rcx], 1);
+                jne(retLabel);
+                mov(r13b, 0);   // set kIsSwimming to 0 depending on if our own isHeavy is set to TRUE
+
+                L(retLabel);
+                mov(rcx, ptr[rip + isSwimmingAddr]);
+                comiss(xmm6, ptr[rcx]);     // this is the games addr for checking if we are at the drowning level
+                jmp(ptr[rip + _OurReturn]); // we do not touch the drowning flag or this address, but we overwrite
+                                            // part of the code so we need to bring it into our injection
+                L(isSwimmingAddr);          // all of this happens directly AFTER GetSubmergedLevel()
+                dq(a_variable);
+
+                L(_OurReturn);
+                dq(a_target + 0xB);  // 0x6F8 - 0x6ED
+            }
+        };
+
+        Patch patch(isSwimmingVariable.address(), target.address());
+        patch.ready();
+
+        auto& trampoline = SKSE::GetTrampoline();
+        trampoline.write_branch<6>(target.address(), L_SOS.CodeAllocation(patch, &trampoline));
+    }
+
+    static void InstallWaterHook()
+    {
+        REL::Relocation<std::uintptr_t> ActorUpdate{ REL::ID(36357) };
+
+        auto& trampoline = SKSE::GetTrampoline();
+        _GetSubmergeLevel = trampoline.write_call<5>(ActorUpdate.address() + 0x6D3, GetSubmergeLevel);
+    }
 
 private:
-    SteamAPICall_t _CreateCoopLobbyImpl(ISteamMatchmaking* a_mm, ELobbyType a_lobbyType) {
-        isNetworkActive = player.IsLobbyOpen ? true : false;
-        return a_mm->CreateLobby(a_lobbyType, 2);
-    };
-    SteamAPICall_t _CreateGroupLobbyImpl(ISteamMatchmaking* a_mm, ELobbyType a_lobbyType) {
-        isNetworkActive = player.IsLobbyOpen ? true : false;
-        return a_mm->CreateLobby(a_lobbyType, 8);
-    };
-    SteamAPICall_t _LeaveLobbyImpl(ISteamMatchmaking* a_mm, CSteamID a_lobby) {
-        a_mm->LeaveLobby(a_lobby);
-    }
-    ConnectedPlayer _ConstructConnectedPlayer() {
+    static float GetSubmergeLevel(RE::Actor* a_this, float a_zPos, RE::TESObjectCELL* a_cell)
+    {
+        float submergedLevel = _GetSubmergeLevel(a_this, a_zPos, a_cell);  // call to the OG
 
-    }
-    Pool _ConstructPool() {
-        pool.ID = "Skyrim DND";
-        for (auto idx = pool.Players.begin(); idx != pool.Players.end(); ++idx) {
-            pool.Players.push_back(_ConstructConnectedPlayer());
-        }
-    }
-    Pool _GetPoolImpl() {
-        return pool;
-    }
-    Player ConstructPlayerInformation() {
-        return []() -> Player {
-            player.PlayerName = RE::PlayerCharacter::GetSingleton()->GetName();
-            player.PlayerLevel = RE::PlayerCharacter::GetSingleton()->GetLevel();
-            //player.PlayerInventory = RE::PlayerCharacter::GetSingleton()->GetInventory();
-            player.PlayerLocation = RE::PlayerCharacter::GetSingleton()->currentLocation;
-            player.IsLobbyOpen = false;
-            return player;
-        }();
-    }
-    RE::NiAVObject* _GetPlayer3DImpl() {
+        static RE::SpellItem* WaterSlowdownSmol = NULL;
+        static RE::SpellItem* WaterSlowdownBeeg = NULL;
+        static RE::SpellItem* WaterSlowdownSwim = NULL;
+        static RE::SpellItem* WaterSlowdownSink = NULL;
+        static RE::TESDataHandler* dataHandle = NULL;
 
-        //for (auto idx : inv) {
+        if (!dataHandle) {  // we only need this to run once
+            dataHandle = RE::TESDataHandler::GetSingleton();
+            if (dataHandle) {
+                WaterSlowdownSmol = dataHandle->LookupForm<RE::SpellItem>(0xD64, "SinkOrSwim.esp");
+                WaterSlowdownBeeg = dataHandle->LookupForm<RE::SpellItem>(0xD65, "SinkOrSwim.esp");
+                WaterSlowdownSwim = dataHandle->LookupForm<RE::SpellItem>(0xD67, "SinkOrSwim.esp");
+                WaterSlowdownSink = dataHandle->LookupForm<RE::SpellItem>(0xD69, "SinkOrSwim.esp");
+            }
+        };
 
-        //}
-    }
+        auto activeEffects = a_this->GetActiveEffectList();
+        isHeavy = FALSE;  // set to false on logic start
+        if (submergedLevel >= 0.69) {
+            a_this->RemoveSpell(WaterSlowdownBeeg);
+            a_this->RemoveSpell(WaterSlowdownSmol);
+            a_this->AddSpell(WaterSlowdownSwim);
+            a_this->AddSpell(WaterSlowdownSink);
 
-    // members
-    static Player player;
-    static Pool pool;
-
-protected:
-    // members
-
-};
-
-class SkyrimOnlineService_DM :
-    public SkyrimOnlineService_Host {
-
-    enum class CharacterSlot : std::uint64_t {
-        kCharacter0 = 0,
-        kCharacter1,
-        kCharacter2,
-        kCharacter3,
-        kCharacter4,
-        kCharacter5,
-        kCharacter6,
-        kCharacter7,
-        kCharacter8,
-    };
-
-    struct ConnectedCharacter {
-    public:
-        CharacterSlot charSlot;
-        RE::Actor* actor;
-        RE::TESFaction* faction;
-        float hp;
-    };
-
-public:
-    // OVERRIDE
-    virtual SteamAPICall_t CreateGroupLobby(ISteamMatchmaking* a_mm, ELobbyType a_lobbyType) { return _CreateGroupLobbyImpl(a_mm, a_lobbyType); };
-    virtual SteamAPICall_t LeaveLobby(ISteamMatchmaking* a_mm, CSteamID a_lobby) { };
-    // ADD
-    //virtual ConnectedCharacter GetCharInfo(CharacterSlot a_slot) { return GetCharacterInformation(a_slot); };
-
-private:
-    SteamAPICall_t _CreateGroupLobbyImpl(ISteamMatchmaking* a_mm, ELobbyType a_lobbyType) {
-        isNetworkActive = this->GetPlayer().IsLobbyOpen ? true : false;
-        return a_mm->CreateLobby(a_lobbyType, 9);
-    };
-    SteamAPICall_t _LeaveLobbyImpl(ISteamMatchmaking* a_mm, CSteamID a_lobby) {
-        a_mm->LeaveLobby(a_lobby);
-    }
-    ConnectedCharacter _ConstructCharacter(CharacterSlot a_slot) {
-        return [a_slot]() -> ConnectedCharacter {
-            for (auto idx = characters.begin(); idx != characters.end(); ++idx) {
-                idx->charSlot = a_slot;
-                idx->actor = skyrim_cast<RE::Actor*>(RE::PlayerCharacter::GetSingleton());
-                idx->faction = idx->actor->GetCrimeFaction();
-                idx->hp = idx->actor->GetActorValue(RE::ActorValue::kHealth);
-                //characters.push_back(&idx.operator==());
-            };
-        }();
-    }
-    
-    ConnectedCharacter GetCharacterInformation(CharacterSlot a_slot) {
-        return [a_slot]() -> ConnectedCharacter {
-            switch (a_slot) {
-            case CharacterSlot::kCharacter0:
-                for (auto idx : characters) {
-                    if (idx.charSlot == CharacterSlot::kCharacter0) {
-                        return idx;
-                    }
-                }
-
-            case CharacterSlot::kCharacter1:
-                for (auto idx : characters) {
-                    if (idx.charSlot == CharacterSlot::kCharacter1) {
-                        return idx;
+            if (activeEffects) {
+                for (auto& ae : *activeEffects) {
+                    if (ae && ae->spell == WaterSlowdownSink) {
+                        if (ae->flags.none(RE::ActiveEffect::Flag::kInactive) && ae->flags.none(RE::ActiveEffect::Flag::kDispelled)) {
+                            if (!a_this->GetCharController()) {
+                                logger::info("Invalid CharController ptr, skipping gravity code.");
+                            } else {
+                                a_this->GetCharController()->gravity = 0.20f;    // set gravity so we "float" when submerged, dont let it reset
+                                isHeavy = TRUE;
+                                if (!a_this->unk16C) {  // we only need this to run ONCE when meeting the condition
+                                    const RE::hkVector4 hkv = { -1.00f, -1.00f, -1.00f, -1.00f };
+                                    a_this->GetCharController()->SetLinearVelocityImpl(hkv);
+                                    a_this->unk16C = TRUE;  // this is a (presumably) unused variable that i am putting to use
+                                    goto JustFuckingLeave;
+                                }
+                            }
+                        }
                     }
                 }
             }
-
-        }();
-    }
-    
-    static std::list<ConnectedCharacter> characters;
-
+        } else if (submergedLevel >= 0.43) {  // everything below seems pretty self-explanatory so i dont feel the need to comment on it
+            a_this->RemoveSpell(WaterSlowdownSmol);
+            a_this->RemoveSpell(WaterSlowdownSwim);
+            a_this->RemoveSpell(WaterSlowdownSink);
+            a_this->AddSpell(WaterSlowdownBeeg);
+            if (!a_this->GetCharController()) {
+                logger::info("Invalid CharController ptr, skipping gravity code.");
+            } else {
+                a_this->GetCharController()->gravity = 1.00f;
+            };
+        } else if (submergedLevel >= 0.18) {
+            a_this->RemoveSpell(WaterSlowdownBeeg);
+            a_this->RemoveSpell(WaterSlowdownSwim);
+            a_this->RemoveSpell(WaterSlowdownSink);
+            a_this->AddSpell(WaterSlowdownSmol);
+            if (!a_this->GetCharController()) {
+                logger::info("Invalid CharController ptr, skipping gravity code.");
+            } else {
+                a_this->GetCharController()->gravity = 1.00f;
+            };
+        } else {
+            a_this->RemoveSpell(WaterSlowdownSwim);
+            a_this->RemoveSpell(WaterSlowdownBeeg);
+            a_this->RemoveSpell(WaterSlowdownSmol);
+            a_this->RemoveSpell(WaterSlowdownSink);
+            if (!a_this->GetCharController()) {
+                logger::info("Invalid CharController ptr, skipping gravity code.");
+            } else {
+                a_this->GetCharController()->gravity = 1.00f;
+                a_this->unk16C = FALSE;  // set this to false when NOT meeting our condition
+            };
+        }
+    JustFuckingLeave:
+        return submergedLevel;
+    };
+    static inline REL::Relocation<decltype(GetSubmergeLevel)> _GetSubmergeLevel;
 };
-
-void func(SkyrimOnlineService_DM* a_dm) {
-    //a_dm->CreateGroupLobby();
-}
-
-struct Player {
-
-public:
-    std::string                         PlayerName = RE::PlayerCharacter::GetSingleton()->GetName();
-    std::uint16_t                       PlayerLevel = RE::PlayerCharacter::GetSingleton()->GetLevel();
-    RE::TESObjectREFR::InventoryItemMap PlayerInventory = RE::PlayerCharacter::GetSingleton()->GetInventory();
-    RE::BGSLocation* PlayerLocation = RE::PlayerCharacter::GetSingleton()->currentLocation;
-    //RE::Actor::GetCurrent3D();
-    bool IsLobbyOpen = false;
-
-};
-
-struct ConnectedPlayer {
-
-public:
-    std::string   PlayerInstance = {};
-    std::uint64_t SteamID = {};
-    std::string   Token = {};
-    Player* player;
-
-};
-
-struct Pool {
-
-public:
-    std::string                ID = {};
-    //std::list<ConnectedPlayer> Players = ConnectedPlayer;
-
-};
-
-struct Scope {
-
-public:
-    std::string     App;
-    //std::list<Pool> Pools = Pool;
-
-};
-
-
-static void SKSEMessageHandler(SKSE::MessagingInterface::Message* message) {
-
-    switch (message->type) {
-    case SKSE::MessagingInterface::kNewGame:
-    case SKSE::MessagingInterface::kPostLoadGame: {
-        break;
-    }
-    case SKSE::MessagingInterface::kPostLoad: {
-        break;
-    }
-    default:
-        break;
-    }
-
-}
-
 
 
 extern "C" DLLEXPORT bool SKSEAPI SKSEPlugin_Load(const SKSE::LoadInterface * a_skse)
 {
-    logger::info("Skyrim Online Service loaded");
+    logger::info("SinkOrSwim loaded");
+
     SKSE::Init(a_skse);
-    SKSE::AllocTrampoline(64);
+    SKSE::AllocTrampoline(128);
+
+    Loki_SinkOrSwim::InstallWaterHook();
+    Loki_SinkOrSwim::InstallSwimmingHook();
 
     return true;
 }
