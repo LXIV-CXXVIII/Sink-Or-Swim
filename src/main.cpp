@@ -142,10 +142,10 @@ private:
                             } else {
                                 a_this->GetCharController()->gravity = 0.20f;    // set gravity so we "float" when submerged, dont let it reset
                                 isHeavy = TRUE;
-                                if (!a_this->unk16C) {  // we only need this to run ONCE when meeting the condition
+                                if (!a_this->pad11) {  // we only need this to run ONCE when meeting the condition
                                     const RE::hkVector4 hkv = { -1.00f, -1.00f, -1.00f, -1.00f };
                                     a_this->GetCharController()->SetLinearVelocityImpl(hkv);
-                                    a_this->unk16C = TRUE;  // this is a (presumably) unused variable that i am putting to use
+                                    a_this->pad11 = TRUE;  // this is a (presumably) unused variable that i am putting to use
                                     goto JustFuckingLeave;
                                 }
                             }
@@ -182,7 +182,7 @@ private:
                 logger::info("Invalid CharController ptr, skipping gravity code.");
             } else {
                 a_this->GetCharController()->gravity = 1.00f;
-                a_this->unk16C = FALSE;  // set this to false when NOT meeting our condition
+                a_this->pad11 = FALSE;  // set this to false when NOT meeting our condition
             };
         }
     JustFuckingLeave:
